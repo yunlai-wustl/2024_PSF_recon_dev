@@ -17,6 +17,7 @@ public:
 	cuda_em_recon(parameters_t p, string output_prefix, string output_path);
 	~cuda_em_recon();
 		
+	void moveListModeDataToGPU(PET_geometry& detector, PET_movement& movement, PET_data& data, int data_index_start, int data_index_end, PET_coincidence_type pet_coinc_type, int device_ID);
 	void Setup_data(PET_geometry& detector, PET_movement& movement, PET_data& data, int data_index_start, int data_index_end, PET_coincidence_type pet_coinc_type, int device_ID);
 	void Setup_data_min(PET_geometry& detector, PET_movement& movement, PET_data& data, int data_index_start, int data_index_end, PET_coincidence_type pet_coinc_type, int device_ID);
 
@@ -31,6 +32,7 @@ public:
 
 
 	void ComputeUpdateFactor(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& UpdateFactor, ImageArray<float>& Attenuation_Image, float &nloglikelihood);
+	void ComputeUpdateFactorPSF(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& UpdateFactor, ImageArray<float>& Attenuation_Image, float &nloglikelihood);
 	void ComputeUpdateFactorScatter(PET_geometry& detector, PET_movement& movement, PET_data_scatter& data, ImageArray<float>& Image, ImageArray<float>& UpdateFactor, ImageArray<float>& Attenuation_Image, float &nloglikelihood);
 	void ComputeUpdateFactorSS(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& UpdateFactor);
 	void ComputeUpdateFactorIS(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& UpdateFactor);
@@ -40,6 +42,8 @@ public:
 	void Backward_Projection_Attenuation(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& Norm_Image);
 	void Backward_Projection_Attenuation_norm(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& Norm_Image, ImageArray<float>& Emission_Image);
 
+	bool firstIter = true;
+	bool lastIter = false;
 
 	
 private:
@@ -49,6 +53,7 @@ private:
 
 	string _output_path;
 	string _output_filename_prefix;
+
 
 	int _ii[MAX_GPU];
 	int _is[MAX_GPU];

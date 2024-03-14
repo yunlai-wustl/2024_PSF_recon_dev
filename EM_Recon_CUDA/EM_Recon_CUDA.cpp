@@ -423,11 +423,14 @@ int main(int argc, char *argv[])
 	float subset_time_start, subset_time_stop;
 
 	new_image.SetValue(0.0f);
-
 	for (full_iter = global_parameters.start_iter; full_iter <= global_parameters.num_iter; full_iter++)
 	{
 		if(global_parameters.num_OSEM_subsets==1){
 			iter = full_iter;
+			if(full_iter>global_parameters.start_iter)
+				recon.firstIter = false;
+			if(full_iter==global_parameters.num_iter)
+				recon.lastIter = true;
 
 			getDtTm(buff);
 
@@ -436,7 +439,7 @@ int main(int argc, char *argv[])
 			subset_time_stop = time_start + (time_stop - time_start) / global_parameters.num_OSEM_subsets * subset_ind;
 			cout << ".....";
 			std::cout << "Start to compute update factor " << std::endl;
-			recon.ComputeUpdateFactor(geometry, movement, prompts_combo, current_image, update_factor_image, atten_image, nloglikelihood_2nd_term);
+			recon.ComputeUpdateFactorPSF(geometry, movement, prompts_combo, current_image, update_factor_image, atten_image, nloglikelihood_2nd_term);
 			// recon.ComputeUpdateFactorSS(geometry, movement, prompts_subset, current_image, update_factor_image);
 
 			if (nloglikelihood_flag)

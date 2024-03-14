@@ -1,6 +1,7 @@
 
 #define _USE_MATH_DEFINES
 #include <math.h>
+#include <chrono>
 
 #include <cuda_runtime.h>
 #include <device_launch_parameters.h>
@@ -7767,11 +7768,18 @@ cuda_em_recon::Setup_data(PET_geometry& detector, PET_movement& movement, PET_da
 	
 	//_Mem_allocation_for_LST_events_uvm(detector, data, _events_x_dominant_uvm, _events_y_dominant_uvm, _event_count_x, _event_count_y);
 	checkCudaErrors(cudaSetDevice(device_ID));
-	_Mem_allocation_for_LST_events_memcopy(detector, movement, data, data_index_start, data_index_end, pet_coinc_type, _events_x_dominant_global_mem[device_ID], _events_y_dominant_global_mem[device_ID], _event_count_x[device_ID], _event_count_y[device_ID], device_ID);
-	//cout << "\n here";
-	checkCudaErrors(cudaDeviceSynchronize());
-	//cout << "Cuda data copy successfully for device " << device_ID << endl;
+	if(firstIter){
+		cout <<"first iteration, loading listmode data to GPU memory" <<endl;
+		cout << "Copying data from " << data_index_start << " to " << data_index_end << " to device " << device_ID << endl;
 
+		_Mem_allocation_for_LST_events_memcopy(detector, movement, data, data_index_start, data_index_end, pet_coinc_type, _events_x_dominant_global_mem[device_ID], _events_y_dominant_global_mem[device_ID], _event_count_x[device_ID], _event_count_y[device_ID], device_ID);
+		//cout << "\n here";
+		checkCudaErrors(cudaDeviceSynchronize());
+		//cout << "Cuda data copy successfully for device " << device_ID << endl;
+	}
+	else{
+		cout<<"already loaded listmode data to GPU memory" <<endl;
+	}
 	_Mem_allocation_for_fp_values(device_ID);
 
 	checkCudaErrors(cudaDeviceSynchronize());
@@ -7779,7 +7787,14 @@ cuda_em_recon::Setup_data(PET_geometry& detector, PET_movement& movement, PET_da
 	//cout << "Cuda fp value copy successfully for device " << device_ID << endl;
 }
 
-
+void
+cuda_em_recon::moveListModeDataToGPU(PET_geometry& detector, PET_movement& movement, PET_data& data, int data_index_start, int data_index_end, PET_coincidence_type pet_coinc_type, int device_ID){
+	//_Mem_allocation_for_LST_events_uvm(detector, data, _events_x_dominant_uvm, _events_y_dominant_uvm, _event_count_x, _event_count_y);
+	checkCudaErrors(cudaSetDevice(device_ID));
+	_Mem_allocation_for_LST_events_memcopy(detector, movement, data, data_index_start, data_index_end, pet_coinc_type, _events_x_dominant_global_mem[device_ID], _events_y_dominant_global_mem[device_ID], _event_count_x[device_ID], _event_count_y[device_ID], device_ID);
+	//cout << "\n here";
+	checkCudaErrors(cudaDeviceSynchronize());
+}
 
 void
 cuda_em_recon::Setup_data_min(PET_geometry& detector, PET_movement& movement, PET_data& data, int data_index_start, int data_index_end, PET_coincidence_type pet_coinc_type, int device_ID){
@@ -7914,11 +7929,14 @@ cuda_em_recon::Release_data(){
 		
 		checkCudaErrors(cudaFree(_fp_value2_x_device[i]));
 		checkCudaErrors(cudaFree(_fp_value2_y_device[i]));
-
-		_Mem_release_for_LST_events_memcopy(_events_x_dominant_global_mem[i], _events_y_dominant_global_mem[i]);
-		_event_count_x[i] = 0;
-		_event_count_y[i] = 0;
-		
+		if(lastIter){
+			_Mem_release_for_LST_events_memcopy(_events_x_dominant_global_mem[i], _events_y_dominant_global_mem[i]);
+			_event_count_x[i] = 0;
+			_event_count_y[i] = 0;
+			cout<<"last iteration, releasing listmode data on GPU memory"<<endl;
+		}
+		else	
+			cout<<"not last iteration, listmode data still on GPU memory" <<endl;
 
 	}
 	//_Mem_release_for_LST_events_uvm(_events_x_dominant_uvm, _events_y_dominant_uvm );
@@ -7948,6 +7966,330 @@ cuda_em_recon::Release_data_scatter(){
 }
 
 
+void
+cuda_em_recon::ComputeUpdateFactorPSF(PET_geometry& detector, PET_movement& movement, PET_data& data, ImageArray<float>& Image, ImageArray<float>& UpdateFactor, ImageArray<float>& Attenuation_Image, float &nloglikelihood){
+
+	cudaStream_t streamA[MAX_GPU], streamB[MAX_GPU], streamC[MAX_GPU], streamD[MAX_GPU];
+	cudaEvent_t eventA[MAX_GPU], eventB[MAX_GPU], eventC[MAX_GPU], eventD[MAX_GPU];
+
+	float milliseconds1 = 0.0f;
+	float milliseconds2 = 0.0f;
+	float milliseconds3 = 0.0f;
+
+	dim3 dimBlock_f_x(BlockSize_forward_x);
+	dim3 dimGrid_f_x(GridSize_forward_x);
+
+	cudaEvent_t eventStart1[MAX_GPU], eventStart2[MAX_GPU], eventStart3[MAX_GPU], eventStop1[MAX_GPU], eventStop2[MAX_GPU], eventStop3[MAX_GPU];
+
+	int device_id,device_data_length;
+	int data_part_index;
+	float* image_host;
+	
+	string filename;
+	stringstream sstm;
+
+	dim3 dimBlock_f_y(BlockSize_forward_y);
+	dim3 dimGrid_f_y(GridSize_forward_y);
+
+	dim3 dimBlock_b_x(BlockSize_backward_x);
+	dim3 dimGrid_b_x(GridSize_backward_x);
+
+	dim3 dimBlock_b_y(BlockSize_backward_y);
+	dim3 dimGrid_b_y(GridSize_backward_y);
+
+	
+
+	dim3 dimBlock(1024);
+	dim3 dimGrid(64);
+	
+	//copy image to all GPUs
+	//cudaHostRegister(Image._image, parameters_host.NUM_XYZ*sizeof(float), cudaHostAllocPortable);
+	for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+		checkCudaErrors(cudaSetDevice(device_id));
+
+		
+		checkCudaErrors(cudaMemcpy(_current_image_device[device_id], Image._image, parameters_host.NUM_XYZ*sizeof(float), cudaMemcpyDefault));
+		
+		checkCudaErrors(cudaMemcpy(_current2_image_device[device_id], Attenuation_Image._image, parameters_host.NUM_XYZ*sizeof(float), cudaMemcpyDefault));
+
+		
+		//setting the update factor to zero before projection
+		setImageToZero_kernel << <dimGrid, dimBlock>> >(_update_factor_device[device_id], _parameters_device[device_id]);
+		
+	}
+	//cudaHostUnregister(Image._image);
+	
+	float nloglikelihood_value_host = 0;
+	for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+		checkCudaErrors(cudaSetDevice(device_id));
+		checkCudaErrors(cudaMalloc((void**)&_nloglikelihood_value[device_id], sizeof(float)));
+		checkCudaErrors(cudaMemcpy(_nloglikelihood_value[device_id], &nloglikelihood_value_host, sizeof(float), cudaMemcpyDefault));
+	}
+
+
+
+	printf("\n\n\n\n.......................Start data projection.........................\n");
+			
+
+   
+    //copy data to all GPUs
+	device_data_length = data.GetDataCount(ALL) / (_num_gpu_end - _num_gpu_start + 1);
+	for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){	    
+		auto start = std::chrono::high_resolution_clock::now();
+		data_part_index = device_id - _num_gpu_start;
+		if (device_id < _num_gpu_end){
+			printf("setting up data on GPU %d\n",device_id);
+			Setup_data(detector, movement, data, data_part_index*device_data_length, (data_part_index + 1)*device_data_length - 1, ALL, device_id);
+		}
+		else{
+			printf("setting up data on GPU %d\n",device_id);
+			Setup_data(detector, movement, data, data_part_index*device_data_length, data.GetDataCount(ALL) - 1, ALL, device_id);
+		} 
+		auto end = std::chrono::high_resolution_clock::now();
+    
+    	// Calculate the duration
+    	auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(end - start);
+    	std::cout << "GPU data allocation took " << duration.count()/1000 << " seconds" << std::endl;
+	}
+		printf("ALL SS/OS/OO data copied to device memory\n");
+
+		parameters_host.FWHM_alpha = parameters_host.FWHM_alpha_ss;
+		parameters_host.FWHM_sigma_inv = parameters_host.FWHM_sigma_inv_ss;
+		parameters_host.global_norm_factor = parameters_host.global_norm_factor_ss;
+		parameters_host.RANGE1 = (int)(parameters_host.FWHM_ss / parameters_host.X_SAMP);
+		parameters_host.RANGE2 = (int)(parameters_host.FWHM_ss / parameters_host.Z_SAMP);
+		printf("H_CENTER_X = %f H_CENTER_Y = %f V_CENTER = %f\n", parameters_host.H_CENTER_X, parameters_host.H_CENTER_Y, parameters_host.V_CENTER);
+		printf("RANGE1 = %d RANGE2 = %d FWHM_SS = %f\n", parameters_host.RANGE1, parameters_host.RANGE2, parameters_host.FWHM_ss);
+		cudaHostRegister(&parameters_host, sizeof(PARAMETERS_IN_DEVICE_t), 0);
+
+		for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+			checkCudaErrors(cudaSetDevice(device_id));
+			checkCudaErrors(cudaDeviceSynchronize());
+
+
+			checkCudaErrors(cudaStreamCreate(&streamA[device_id]));
+			checkCudaErrors(cudaStreamCreate(&streamB[device_id]));
+			checkCudaErrors(cudaStreamCreate(&streamC[device_id]));
+			
+			checkCudaErrors(cudaEventCreateWithFlags(&eventA[device_id], cudaEventDisableTiming));
+			//checkCudaErrors(cudaEventCreate(&eventB[device_id]));
+			//checkCudaErrors(cudaEventCreate(&eventC[device_id]));
+
+			checkCudaErrors(cudaEventCreate(&eventStart1[device_id]));
+			checkCudaErrors(cudaEventCreate(&eventStart2[device_id]));
+			
+			checkCudaErrors(cudaEventCreate(&eventStop1[device_id]));
+			checkCudaErrors(cudaEventCreate(&eventStop2[device_id]));
+			
+		}
+
+		for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+			cudaSetDevice(device_id);
+			printf("\n\n\n\n.......................Start projection on Device %d.........................\n",device_id);
+			
+
+
+			checkCudaErrors(cudaMemcpyAsync(_parameters_device[device_id], &parameters_host, sizeof(PARAMETERS_IN_DEVICE_t), cudaMemcpyDefault, streamA[device_id]));
+			checkCudaErrors(cudaEventRecord(eventA[device_id], streamA[device_id]));
+			
+			setForwardProjectionValueToZero_kernel << <dimGrid, dimBlock, 0, streamB[device_id] >> >(_fp_value_x_device[device_id], _event_count_x[device_id]);
+			setForwardProjectionValueToZero_kernel << <dimGrid, dimBlock, 0, streamC[device_id] >> >(_fp_value_y_device[device_id], _event_count_y[device_id]);
+			
+			//if (atten_flag_fp){
+				setForwardProjectionValueToZero_kernel << <dimGrid, dimBlock, 0, streamB[device_id] >> >(_fp_value2_x_device[device_id], _event_count_x[device_id]);
+				setForwardProjectionValueToZero_kernel << <dimGrid, dimBlock, 0, streamC[device_id] >> >(_fp_value2_y_device[device_id], _event_count_y[device_id]);
+			//}
+
+			//if (export_likelihood_flag){
+				//setForwardProjectionValueToZero_kernel << <dimGrid, dimBlock, 0, streamB[device_id] >> >(_fp_value2_x_device[device_id], _event_count_x[device_id]);
+				//setForwardProjectionValueToZero_kernel << <dimGrid, dimBlock, 0, streamC[device_id] >> >(_fp_value2_y_device[device_id], _event_count_y[device_id]);
+			//}
+			
+			if (_TOF_mode == TOF){
+				//TOF version
+				printf("starting TOF kernels.\n");
+
+				checkCudaErrors(cudaStreamWaitEvent(streamB[device_id], eventA[device_id], 0));
+				checkCudaErrors(cudaEventRecord(eventStart1[device_id], streamB[device_id]));
+
+				if (atten_flag_fp){
+
+					_fproj_atten_lst_cuda_x_kernel << <dimGrid_f_x, dimBlock_f_x, 0, streamB[device_id] >> >(_current2_image_device[device_id], _fp_value2_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+					
+
+					_TOF_fproj_lst_cuda_x_kernel_atten << <dimGrid_f_x, dimBlock_f_x, 0, streamB[device_id] >> >(_current_image_device[device_id], _fp_value_x_device[device_id], _fp_value2_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+					if (export_likelihood_flag){
+						//_fproj_atten_lst_cuda_x_kernel << <dimGrid_f_x, dimBlock_f_x, 0, streamB[device_id] >> >(_atten_image_device[device_id], _fp_value2_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+						vector_sum_of_log << <dimGrid, dimBlock, 0, streamB[device_id] >> >(_fp_value_x_device[device_id], _event_count_x[device_id], _nloglikelihood_value[device_id]);
+					}
+				}
+
+				else{
+					_TOF_fproj_lst_cuda_x_kernel << <dimGrid_f_x, dimBlock_f_x, 0, streamB[device_id] >> >(_current_image_device[device_id], _fp_value_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+
+				}
+
+
+				checkCudaErrors(cudaStreamWaitEvent(streamC[device_id], eventA[device_id], 0));
+				checkCudaErrors(cudaEventRecord(eventStart2[device_id], streamC[device_id]));
+
+				if (atten_flag_fp){
+
+					_fproj_atten_lst_cuda_y_kernel << <dimGrid_f_y, dimBlock_f_y, 0, streamC[device_id] >> >(_current2_image_device[device_id], _fp_value2_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+					
+
+					_TOF_fproj_lst_cuda_y_kernel_atten << <dimGrid_f_y, dimBlock_f_y, 0, streamC[device_id] >> >(_current_image_device[device_id], _fp_value_y_device[device_id], _fp_value2_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+					if (export_likelihood_flag){
+						//_fproj_atten_lst_cuda_y_kernel << <dimGrid_f_y, dimBlock_f_y, 0, streamC[device_id] >> >(_atten_image_device[device_id], _fp_value2_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+						vector_sum_of_log << <dimGrid, dimBlock, 0, streamC[device_id] >> >(_fp_value_y_device[device_id], _event_count_y[device_id], _nloglikelihood_value[device_id]);
+					}
+				}
+				else{
+					_TOF_fproj_lst_cuda_y_kernel << <dimGrid_f_y, dimBlock_f_y, 0, streamC[device_id] >> >(_current_image_device[device_id], _fp_value_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+				}
+
+				if (atten_flag_bp){
+					_TOF_b_ratio_proj_lst_cuda_x_kernel_atten << <dimGrid_b_x, dimBlock_b_x, 0, streamB[device_id] >> >(_update_factor_device[device_id], _fp_value_x_device[device_id], _fp_value2_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+					//cudaEventRecord(eventB[device_id], streamB[device_id]);
+					checkCudaErrors(cudaEventRecord(eventStop1[device_id], streamB[device_id]));
+
+					_TOF_b_ratio_proj_lst_cuda_y_kernel_atten << <dimGrid_b_y, dimBlock_b_y, 0, streamC[device_id] >> >(_update_factor_device[device_id], _fp_value_y_device[device_id], _fp_value2_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+					//cudaEventRecord(eventC[device_id], streamC[device_id]);
+					checkCudaErrors(cudaEventRecord(eventStop2[device_id], streamC[device_id]));
+				}
+				else{
+
+					_TOF_b_ratio_proj_lst_cuda_x_kernel << <dimGrid_b_x, dimBlock_b_x, 0, streamB[device_id] >> >(_update_factor_device[device_id], _fp_value_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+					//cudaEventRecord(eventB[device_id], streamB[device_id]);
+					checkCudaErrors(cudaEventRecord(eventStop1[device_id], streamB[device_id]));
+
+					_TOF_b_ratio_proj_lst_cuda_y_kernel << <dimGrid_b_y, dimBlock_b_y, 0, streamC[device_id] >> >(_update_factor_device[device_id], _fp_value_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+					//cudaEventRecord(eventC[device_id], streamC[device_id]);
+					checkCudaErrors(cudaEventRecord(eventStop2[device_id], streamC[device_id]));
+				}
+				
+			}
+			else{
+				//NON-TOF version
+				printf("starting NON-TOF kernels.\n");
+
+				checkCudaErrors(cudaStreamWaitEvent(streamB[device_id], eventA[device_id], 0));
+				checkCudaErrors(cudaEventRecord(eventStart1[device_id], streamB[device_id]));
+				_fproj_lst_cuda_x_kernel << <dimGrid_f_x, dimBlock_f_x, 0, streamB[device_id] >> >(_current_image_device[device_id], _fp_value_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+				if (export_likelihood_flag){
+					//_fproj_atten_lst_cuda_x_kernel << <dimGrid_f_x, dimBlock_f_x, 0, streamB[device_id] >> >(_atten_image_device[device_id], _fp_value2_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+					vector_sum_of_log << <dimGrid, dimBlock, 0, streamB[device_id] >> >(_fp_value_x_device[device_id], _event_count_x[device_id], _nloglikelihood_value[device_id]);
+				}
+
+
+				checkCudaErrors(cudaStreamWaitEvent(streamC[device_id], eventA[device_id], 0));
+				checkCudaErrors(cudaEventRecord(eventStart2[device_id], streamC[device_id]));
+				_fproj_lst_cuda_y_kernel << <dimGrid_f_y, dimBlock_f_y, 0, streamC[device_id] >> >(_current_image_device[device_id], _fp_value_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+				if (export_likelihood_flag){
+					//_fproj_atten_lst_cuda_y_kernel << <dimGrid_f_y, dimBlock_f_y, 0, streamC[device_id] >> >(_atten_image_device[device_id], _fp_value2_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+					vector_sum_of_log << <dimGrid, dimBlock, 0, streamC[device_id] >> >(_fp_value_y_device[device_id], _event_count_y[device_id], _nloglikelihood_value[device_id]);
+				}
+
+				_b_ratio_proj_lst_cuda_x_kernel << <dimGrid_b_x, dimBlock_b_x, 0, streamB[device_id] >> >(_update_factor_device[device_id], _fp_value_x_device[device_id], _events_x_dominant_global_mem[device_id], _parameters_device[device_id]);
+				//cudaEventRecord(eventB[device_id], streamB[device_id]);
+				checkCudaErrors(cudaEventRecord(eventStop1[device_id], streamB[device_id]));
+
+				_b_ratio_proj_lst_cuda_y_kernel << <dimGrid_b_y, dimBlock_b_y, 0, streamC[device_id] >> >(_update_factor_device[device_id], _fp_value_y_device[device_id], _events_y_dominant_global_mem[device_id], _parameters_device[device_id]);
+				//cudaEventRecord(eventC[device_id], streamC[device_id]);
+				checkCudaErrors(cudaEventRecord(eventStop2[device_id], streamC[device_id]));
+
+			}
+
+		}
+
+		for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+			checkCudaErrors(cudaSetDevice(device_id));
+
+			/*
+			checkCudaErrors(cudaStreamSynchronize(streamA[device_id]));
+			checkCudaErrors(cudaStreamSynchronize(streamB[device_id]));
+			checkCudaErrors(cudaStreamSynchronize(streamC[device_id]));
+			*/
+			
+			checkCudaErrors(cudaEventSynchronize(eventStart1[device_id]));
+			checkCudaErrors(cudaEventSynchronize(eventStart2[device_id]));
+			
+			checkCudaErrors(cudaEventSynchronize(eventStop1[device_id]));
+			checkCudaErrors(cudaEventSynchronize(eventStop2[device_id]));
+			
+			
+
+			checkCudaErrors(cudaEventElapsedTime(&milliseconds1, eventStart1[device_id], eventStop1[device_id]));
+			checkCudaErrors(cudaEventElapsedTime(&milliseconds2, eventStart2[device_id], eventStop2[device_id]));
+			
+
+			printf("\n.......................Wrapping up for device %d........................\n", device_id);
+			printf("Time for X-dominant projections: %f seconds\n", milliseconds1 / 1000);
+			printf("Time for Y-dominant projections: %f seconds\n", milliseconds2 / 1000);
+			
+			
+			checkCudaErrors(cudaEventDestroy(eventA[device_id]));
+			/*
+			checkCudaErrors(cudaEventDestroy(eventB[device_id]));
+			checkCudaErrors(cudaEventDestroy(eventC[device_id]));
+			*/
+			
+			checkCudaErrors(cudaEventDestroy(eventStart1[device_id]));
+			checkCudaErrors(cudaEventDestroy(eventStart2[device_id]));
+			
+			checkCudaErrors(cudaEventDestroy(eventStop1[device_id]));
+			checkCudaErrors(cudaEventDestroy(eventStop2[device_id]));
+			
+
+			checkCudaErrors(cudaStreamDestroy(streamA[device_id]));
+			checkCudaErrors(cudaStreamDestroy(streamB[device_id]));
+			checkCudaErrors(cudaStreamDestroy(streamC[device_id]));
+			
+
+			//cudaDeviceSynchronize();
+		}
+			
+		cudaHostUnregister(&parameters_host);
+
+		printf("\n... start clean up data\n\n");
+		Release_data();
+		printf("\n... done clean up data\n\n");
+
+
+		UpdateFactor.SetValue(0.0f);
+		image_host = (float*)malloc(parameters_host.NUM_XYZ*sizeof(float));
+		//copy the update factor back to host memory
+		for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+			cudaSetDevice(device_id);
+			cudaDeviceSynchronize();
+			cudaMemcpy(image_host, _update_factor_device[device_id], parameters_host.NUM_XYZ*sizeof(float), cudaMemcpyDefault);
+			UpdateFactor.AddFromMem(image_host);
+		}
+
+		if (export_likelihood_flag){
+			float temp;
+			for (device_id = _num_gpu_start; device_id <= _num_gpu_end; device_id++){
+				cudaSetDevice(device_id);
+				cudaDeviceSynchronize();
+				cudaMemcpy(&temp, _nloglikelihood_value[device_id], sizeof(float), cudaMemcpyDefault);
+				cudaFree(_nloglikelihood_value[device_id]);
+				cudaDeviceSynchronize();
+				nloglikelihood_value_host += temp;
+			}
+
+			nloglikelihood = -nloglikelihood_value_host;
+		}
+		else{
+			nloglikelihood = 0;
+		}
+
+
+		//Put the image_host (update factor) values to UpdateFactor array
+		
+		printf("\n\n\n\n.......................End projection.........................\n");
+
+	free(image_host);
+}
 
 
 void
